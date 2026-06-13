@@ -28,7 +28,7 @@ const REFRESH_MIN: Duration = Duration::from_secs(60);
 use deku::{DekuContainerWrite, DekuUpdate};
 
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum MessageTarget {
     Token(Vec<u8>),
     Uuid(String),

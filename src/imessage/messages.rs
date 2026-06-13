@@ -27,7 +27,7 @@ const ZERO_NONCE: [u8; 16] = [
 ];
 // conversation data, used to uniquely identify a conversation from a message
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ConversationData {
     pub participants: Vec<String>,
     pub cv_name: Option<String>,
@@ -41,7 +41,7 @@ impl ConversationData {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
 pub struct TextFlags {
     pub bold: bool,
     pub italic: bool,
@@ -91,7 +91,7 @@ impl TextFlags {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub enum TextEffect {
     Big = 5,
     Small = 11,
@@ -121,7 +121,7 @@ impl TryFrom<u32> for TextEffect {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub enum TextFormat {
     Flags(TextFlags),
     Effect(TextEffect),
@@ -158,7 +158,7 @@ impl Default for TextFormat {
 }
 
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum MessagePart {
     Text(String, TextFormat),
     Attachment(Attachment),
@@ -167,7 +167,7 @@ pub enum MessagePart {
 }
 
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct IndexedMessagePart {
     pub part: MessagePart,
     pub idx: Option<usize>,
@@ -175,7 +175,7 @@ pub struct IndexedMessagePart {
 }
 
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MessageParts(pub Vec<IndexedMessagePart>);
 
 impl MessageParts {
@@ -599,7 +599,7 @@ impl MessageParts {
 }
 
 #[repr(C)]
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, Serialize, Deserialize)]
 pub enum MessageType {
     IMessage,
     SMS {
@@ -735,7 +735,7 @@ impl Balloon {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ScheduleMode {
     pub ms: u64,
     pub schedule: bool,
@@ -743,7 +743,7 @@ pub struct ScheduleMode {
 
 // a "normal" imessage, containing multiple parts and text
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NormalMessage {
     pub parts: MessageParts,
     pub effect: Option<String>,
@@ -759,7 +759,7 @@ pub struct NormalMessage {
 }
 
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct LinkMeta {
     pub data: LPLinkMetadata,
     pub attachments: Vec<Vec<u8>>,
@@ -788,20 +788,20 @@ impl NormalMessage {
 }
 
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RenameMessage {
     pub new_name: String
 }
 
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ChangeParticipantMessage {
     pub new_participants: Vec<String>,
     pub group_version: u64
 }
 
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum Reaction {
     Heart,
     Like,
@@ -904,7 +904,7 @@ impl PartExtension {
 }
 
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum ReactMessageType {
     React {
         reaction: Reaction,
@@ -1008,7 +1008,7 @@ impl ReactMessageType {
 }
 
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ReactMessage {
     pub to_uuid: String,
     pub to_part: Option<u64>,
@@ -1018,7 +1018,7 @@ pub struct ReactMessage {
 }
 
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ErrorMessage {
     pub for_uuid: String,
     pub status: u64,
@@ -1045,14 +1045,14 @@ impl ReactMessage {
 }
 
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UnsendMessage {
     pub tuuid: String,
     pub edit_part: u64,
 }
 
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EditMessage {
     pub tuuid: String,
     pub edit_part: u64,
@@ -1444,39 +1444,39 @@ impl Attachment {
 
 // file should be 570x570 png
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct IconChangeMessage {
     pub file: Option<MMCSFile>,
     pub group_version: u64,
 }
 
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UpdateExtensionMessage {
     pub for_uuid: String,
     pub ext: PartExtension,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum DeleteTarget {
     Chat(OperatedChat),
     Messages(Vec<String>)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MoveToRecycleBinMessage {
     pub target: DeleteTarget,
     pub recoverable_delete_date: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PermanentDeleteMessage {
     pub target: DeleteTarget,
     pub is_scheduled: bool,
 }
 
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UpdateProfileMessage {
     pub profile: Option<ShareProfileMessage>,
     pub share_contacts: bool,
@@ -1587,14 +1587,14 @@ impl SetTranscriptBackgroundMessage {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TypingApp {
     pub bundle_id: String,
     pub icon: Vec<u8>,
 }
 
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum Message {
     Message(NormalMessage),
     RenameMessage(RenameMessage),
@@ -1903,7 +1903,7 @@ impl From<MMCSFile> for RawMMCSBalloon {
 
 // a message that can be sent to other iMessage users
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MessageInst {
     pub id: String,
     pub sender: Option<String>,

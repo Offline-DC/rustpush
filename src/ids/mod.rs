@@ -3,7 +3,7 @@ use std::{fmt::Debug, ops::{Deref, DerefMut}};
 use openssl::{bn::{BigNum, BigNumContext}, ec::{EcGroup, EcKey, EcPoint}, hash::MessageDigest, nid::Nid, pkey::{HasPublic, PKey, Private, Public}, sign::{Signer, Verifier}};
 use plist::Value;
 use rasn::{types::Integer, AsnType, Decode, Encode};
-use serde::{de::DeserializeOwned, Deserialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::{util::{bin_deserialize_opt_vec, encode_hex, plist_to_bin, ungzip}, PushError};
 use num_bigint::{BigInt, Sign};
 
@@ -89,7 +89,7 @@ pub struct IDSRecvMessage {
     pub topic: &'static str,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CertifiedContext {
     pub version: u32,
     pub receipt: Vec<u8>,
