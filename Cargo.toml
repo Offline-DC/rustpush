@@ -7,6 +7,11 @@ edition = "2021"
 remote-anisette-v3 = ["omnisette/remote-anisette-v3", "icloud_auth/remote-anisette-v3"]
 remote-clearadi = ["omnisette/remote-clearadi", "icloud_auth/remote-clearadi"]
 macos-validation-data = ["dep:open-absinthe"]
+# Like macos-validation-data, but for MacOSConfigRemote (macos_remote.rs), which
+# is fully self-contained — its own HardwareConfig, NO open-absinthe and NO
+# unicorn — and offloads NAC create/sign to a remote server. Enable this on the
+# Android build to use the LAN NAC validation server.
+macos-remote-validation = []
 default = ["macos-validation-data"]
 
 [dependencies]

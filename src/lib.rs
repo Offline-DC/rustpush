@@ -26,6 +26,11 @@ pub use util::CompactECKey;
 #[cfg(feature = "macos-validation-data")]
 pub mod macos;
 
+// MacOSConfigRemote: same identity as MacOSConfig, but validation data comes from
+// a remote NAC server (Android-safe; no local absinthe). See macos_remote.rs.
+#[cfg(feature = "macos-remote-validation")]
+pub mod macos_remote;
+
 mod relay;
 
 pub mod mmcsp {
@@ -38,7 +43,7 @@ use std::fmt::Debug;
 pub use icloud_auth::{DefaultAnisetteProvider, GenerateVerificationTokenRequest, default_provider, ArcAnisetteClient, LoginClientInfo, LoginState, AppleAccount, VerifyBody, TrustedPhoneNumber};
 
 pub use util::{DebugRwLock, DebugMutex};
-use activation::ActivationInfo;
+pub use activation::ActivationInfo;
 pub use aps::{APSConnectionResource, APSConnection, APSMessage, APSState};
 use async_trait::async_trait;
 pub use auth::{request_update_account, UpdateAccountFinish};

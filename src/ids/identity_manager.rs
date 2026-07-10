@@ -865,6 +865,18 @@ impl IdentityResource {
 
     pub async fn validate_targets(&self, targets: &[String], topic: &'static str, handle: &str) -> Result<Vec<String>, PushError> {
         self.cache_keys(topic, targets, handle, false, &QueryOptions::default()).await?;
+        let valid: Vec<String> = {
+            let key_cache = self.cache.lock().await;
+            targets.iter().filter(|target| !key_cache.get_keys(&topic, handle, *target).is_empty()).map(|i| i.clone()).collect()
+        };
+        if valid.len() == targets.len() {
+            return Ok(valid);
+        }
+        // Some targets resolved to NO iMessage keys under refresh=false. Force ONE fresh IDS
+        // lookup — a stale/empty cache entry (a number looked up before it registered on
+        // iMessage, or during a transient failure) would otherwise keep showing an
+        // iMessage-capable recipient as SMS-only (green) forever.
+        self.cache_keys(topic, targets, handle, true, &QueryOptions::default()).await?;
         let key_cache = self.cache.lock().await;
         Ok(targets.iter().filter(|target| !key_cache.get_keys(&topic, handle, *target).is_empty()).map(|i| i.clone()).collect())
     }

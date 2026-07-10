@@ -32,7 +32,7 @@ use base64::Engine;
 use prost::Message;
 use rasn::{AsnType, Decode, Encode};
 use reqwest::header::{HeaderMap, HeaderValue};
-use reqwest::{Certificate, Client, Proxy};
+use reqwest::{Certificate, Client};
 use serde::de::{DeserializeOwned, value};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::json;
@@ -205,22 +205,12 @@ impl<T> DebugRwLock<T> {
 }
 
 
-fn build_proxy() -> Client {
-    let mut headers = HeaderMap::new();
-    headers.insert("Accept-Language", HeaderValue::from_static("en-US,en;q=0.9"));
-
-    reqwest::Client::builder()
-        .use_rustls_tls()
-        .proxy(Proxy::https("https://192.168.99.71:8080").unwrap())
-        .default_headers(headers)
-        .http1_title_case_headers()
-        .danger_accept_invalid_certs(true)
-        .build().unwrap()
-}
-
-
 pub static REQWEST: LazyLock<Client> = LazyLock::new(|| {
-    // return build_proxy();
+    // NOTE: this used to `return build_proxy();` — routing ALL traffic through a
+    // hardcoded LAN debug proxy (192.168.3.3:8080, invalid-cert accepted). That
+    // footgun made every request fail with "Connection refused" on any device not
+    // on that proxy's network (e.g. the phone). Removed. For local API inspection,
+    // set the standard HTTPS_PROXY / HTTP_PROXY env vars — reqwest honors them.
     let certificates = vec![
         Certificate::from_pem(include_bytes!("../certs/root/profileidentity.ess.apple.com.cert")).unwrap(),
         Certificate::from_pem(include_bytes!("../certs/root/init.ess.apple.com.cert")).unwrap(),
@@ -232,6 +222,11 @@ pub static REQWEST: LazyLock<Client> = LazyLock::new(|| {
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
         .default_headers(headers.clone())
+        // Bound connection establishment so an unreachable host (e.g. the LAN NAC /
+        // anisette server, or Apple with no network) fails fast instead of hanging a
+        // sign-in forever. Only the CONNECT is bounded — no total timeout — so large
+        // MMCS attachment transfers on this shared client aren't cut off.
+        .connect_timeout(std::time::Duration::from_secs(15))
         .http1_title_case_headers();
 
     for certificate in certificates.into_iter() {
@@ -242,7 +237,6 @@ pub static REQWEST: LazyLock<Client> = LazyLock::new(|| {
 });
 
 pub static CARRIER_REQWEST: LazyLock<Client> = LazyLock::new(|| {
-    // return build_proxy();
     let mut headers = HeaderMap::new();
     headers.insert("Accept-Language", HeaderValue::from_static("en-US,en;q=0.9"));
 

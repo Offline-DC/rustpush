@@ -405,6 +405,12 @@ pub async fn login_apple_delegates<T: AnisetteProvider>(account: &AppleAccount<T
             .await?;
     let text = resp.text().await?;
 
+    // TEMP DIAGNOSTIC (imessage-register): dump the full setup.icloud.com reply
+    // so we can see everything Apple returns, not just localizedError.
+    if std::env::var("DUMP_DELEGATE_RESPONSE").is_ok() {
+        eprintln!("=== setup.icloud.com/signin raw response ===\n{text}\n=== end ===");
+    }
+
     let parsed = plist::Value::from_reader(Cursor::new(text.as_str()))?;
     let parsed_dict = parsed.as_dictionary().unwrap();
 

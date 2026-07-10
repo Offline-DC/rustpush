@@ -223,19 +223,46 @@ pub(crate) fn contained_gcm_encrypt(key: &[u8], secret: &[u8]) -> Result<Vec<u8>
 }
 
 pub(crate) fn contained_gcm_decrypt(key: &[u8], text: &[u8]) -> Result<Vec<u8>, KeystoreError> {
-    let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
-                
-    Ok(cipher.decrypt(Nonce::from_slice(&text[..12]), &text[12..]).expect("Failed to GCM"))
+    // Never panic on a bad/foreign/corrupt entry: bounds-check the nonce, and turn a
+    // wrong-key / tag-mismatch into an error (this used to `.expect("Failed to GCM")`).
+    if text.len() < 12 {
+        return Err(KeystoreError::KeystoreError("AES-GCM entry too short (<12B nonce)".into()));
+    }
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|_| KeystoreError::KeystoreError("AES-GCM bad key length".into()))?;
+    cipher.decrypt(Nonce::from_slice(&text[..12]), &text[12..])
+        .map_err(|_| KeystoreError::KeystoreError("AES-GCM decrypt failed (wrong key or corrupt entry)".into()))
 }
 
 impl<T: SoftwareKeystoreEncryptor> SoftwareKeystore<T> {
 
     fn get_key(&self, alias: &str) -> Result<SoftwareKeystoreKey, KeystoreError> {
         let state = self.state.read().expect("Failed to read!");
-        let key = state.keys.get(alias).ok_or(KeystoreError::KeyNotFound)?;
-        
+        let Some(key) = state.keys.get(alias) else {
+            // Name the missing alias AND list what's actually here — this is how you tell a
+            // dangling migrated key (e.g. `activation:<serial>` or a user auth key whose
+            // private half lived in OpenBubbles' un-transferable keystore) from an empty
+            // keystore that just needs (re-)registration.
+            log::warn!(
+                "keystore get_key: alias '{alias}' NOT FOUND — keystore holds {} key(s): [{}]",
+                state.keys.len(),
+                state.keys.keys().cloned().collect::<Vec<_>>().join(", ")
+            );
+            return Err(KeystoreError::KeyNotFound);
+        };
+
         let cipher = self.encryptor.decrypt(&key.as_ref())?;
-        Ok(plist::from_bytes(&cipher).expect("Failed to decrypt!"))
+        // Do NOT panic if the (decrypted) bytes aren't a valid key plist. That happens when
+        // the stored entry is foreign/encrypted — e.g. an imported OpenBubbles keystore read
+        // through NoEncryptor — or corrupt. Returning an error lets the caller fail
+        // gracefully; the previous `.expect("Failed to decrypt!")` panicked WHILE the APS
+        // state lock was held, which SIGABRT'd / deadlocked the whole app.
+        plist::from_bytes(&cipher).map_err(|e| {
+            log::error!("keystore get_key: alias '{alias}' failed to decode ({e}) — foreign/encrypted or corrupt entry");
+            KeystoreError::KeystoreError(format!(
+                "key '{alias}' did not decode ({e}); stored entry is not a readable key for this \
+                 keystore (foreign/encrypted or corrupt)"))
+        })
     }
 
     fn save_key(&self, alias: &str, key: SoftwareKeystoreKey) -> Result<(), KeystoreError> {
@@ -247,6 +274,7 @@ impl<T: SoftwareKeystoreEncryptor> SoftwareKeystore<T> {
         }
         state.keys.insert(alias.to_string(), key.into());
         (self.update_state)(&*state);
+        log::info!("keystore: saved key '{alias}' (now {} key(s))", state.keys.len());
         Ok(())
     }
 }
@@ -326,10 +354,16 @@ impl<T: SoftwareKeystoreEncryptor + Send + Sync + 'static> Keystore for Software
                 rsa_body
             },
             SoftwareKeystoreKey::Aes(e) => {
-                let cipher = Aes256Gcm::new_from_slice(&e).unwrap();
-                
-                let cipher = cipher.decrypt(Nonce::from_slice(&ciphertext[..12]), &ciphertext[12..]).expect("Failed to GCM");
-                cipher
+                // Bad key length / short ciphertext / wrong key → error, never panic
+                // (mirrors get_key; this used to `.unwrap()`/`.expect("Failed to GCM")` and
+                // could SIGABRT the app on a malformed inbound payload).
+                if ciphertext.len() < 12 {
+                    return Err(KeystoreError::KeystoreError("AES-GCM ciphertext too short (<12B nonce)".into()));
+                }
+                let cipher = Aes256Gcm::new_from_slice(&e)
+                    .map_err(|_| KeystoreError::KeystoreError("AES key bad length".into()))?;
+                cipher.decrypt(Nonce::from_slice(&ciphertext[..12]), &ciphertext[12..])
+                    .map_err(|_| KeystoreError::KeystoreError("AES-GCM decrypt failed (wrong key or corrupt data)".into()))?
             }
             _ => return Err(KeystoreError::BadKeyType(key.get_type())),
         };
