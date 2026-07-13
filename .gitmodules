@@ -3,4 +3,10 @@
 	url = https://github.com/Offline-DC/apple-private-apis.git
 [submodule "open-absinthe"]
 	path = open-absinthe
-	url = git@github.com:OpenBubbles/OpenAbsinthe-Stub.git
+	# HTTPS, not git@ SSH. This submodule is never COMPILED for Android (the
+	# macos-validation-data feature is off there, and unicorn-engine won't
+	# cross-compile anyway) — but cargo reads every path dependency's manifest
+	# during resolution, so the directory must still exist to `cargo build` at
+	# all. That makes this a required clone on every machine and in CI, and CI
+	# runners have no SSH key. It's a public repo; HTTPS clones anonymously.
+	url = https://github.com/OpenBubbles/OpenAbsinthe-Stub.git

@@ -23,8 +23,21 @@ openssl = { version = "0.10.56", features = ["vendored"] }
 uuid = { version = "1.4.1", features = ["v4"] }
 base64 = "0.21.2"
 regex = "1.9.3"
-tokio-rustls = "0.26.4"
-rustls = "0.23.38"
+# ring, NOT aws-lc-rs. rustls 0.23 and tokio-rustls 0.26 both default to the
+# aws-lc-rs crypto provider, which drags in `aws-lc-sys` — a large C/asm library
+# built via cmake. Two reasons that's wrong for the Android build:
+#   1. Size. It lands in the armeabi-v7a `libsmarttxt_ffi.so` shipped inside the
+#      launcher APK, on a phone where every MB of download counts.
+#   2. Cross-compilation. aws-lc-sys wants cmake + bindgen configured for the NDK;
+#      ring cross-compiles to armv7-android out of the box.
+# Nothing depends on aws-lc: smarttxt-ffi installs the ring provider process-wide
+# (`rustls::crypto::ring::default_provider().install_default()`) and
+# ClientConfig::builder() uses whatever provider is installed. Feature lists below
+# are the upstream defaults minus the provider. Keep in sync with smarttxt-ffi's
+# rustls dep — cargo features are additive, so if EITHER crate leaves defaults on,
+# aws-lc-rs comes back for the whole graph.
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "tls12", "ring"] }
+rustls = { version = "0.23.38", default-features = false, features = ["logging", "std", "tls12", "ring"] }
 rustls-pemfile = "1.0.3"
 rand = { version = "0.8.5", features = ["min_const_gen"] }
 libflate = "2.0.0"
