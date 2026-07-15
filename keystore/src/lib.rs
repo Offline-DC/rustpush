@@ -195,9 +195,68 @@ pub trait KeystoreEncryptKey: KeystoreKey {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Clone)]
 pub struct RsaKey(pub String);
+
+// RsaKey serializes as its keystore ALIAS (a `<string>`), and historically only
+// deserialized from that alias. But some builds — notably OpenBubbles releases on an
+// older rustpush — persisted the RSA private-key MATERIAL inline as raw PKCS#1 DER
+// (`<data>`) instead of a keystore alias. To migrate those without forcing a
+// re-registration, accept EITHER on-disk form:
+//   • `<string>` -> an existing keystore alias  (unchanged behaviour; the common case)
+//   • `<data>`   -> raw PKCS#1 DER -> import into the process keystore under a
+//                   content-derived alias, then use that alias.
+// This is the single bridge that lets `push.keypair` and every `id.plist` keypair load
+// regardless of which scheme produced them. Identity keys are unaffected (they use their
+// own inline openssl (de)serializers).
+impl<'de> Deserialize<'de> for RsaKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct RsaKeyVisitor;
+        impl<'de> serde::de::Visitor<'de> for RsaKeyVisitor {
+            type Value = RsaKey;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a keystore alias string, or raw PKCS#1 RSA private-key DER bytes")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<RsaKey, E> {
+                Ok(RsaKey(v.to_owned()))
+            }
+            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<RsaKey, E> {
+                Ok(RsaKey(v))
+            }
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<RsaKey, E> {
+                RsaKey::import_der(v).map_err(serde::de::Error::custom)
+            }
+            fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<RsaKey, E> {
+                RsaKey::import_der(&v).map_err(serde::de::Error::custom)
+            }
+        }
+        deserializer.deserialize_any(RsaKeyVisitor)
+    }
+}
+
 impl RsaKey {
+    /// Import raw PKCS#1 RSA private-key DER into the process keystore and return an
+    /// aliased handle. The alias is derived from the key bytes, so importing the same
+    /// material twice is a no-op (idempotent — `KeyAlreadyExists` is treated as success).
+    /// Used to migrate identities that stored key material inline rather than as an alias.
+    pub fn import_der(der: &[u8]) -> Result<Self, KeystoreError> {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(der);
+        let alias = format!(
+            "imported:rsa:{}",
+            hash.iter().take(10).map(|b| format!("{b:02x}")).collect::<String>()
+        );
+        // bits is informational for import (the software keystore parses the DER and
+        // ignores it); pass a nominal value.
+        match keystore().import_key(&alias, KeyType::Rsa(2048), der, KeystoreAccessRules::default()) {
+            Ok(()) | Err(KeystoreError::KeyAlreadyExists) => Ok(Self(alias)),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn overwrite(key: &str, bits: u16, access_rules: KeystoreAccessRules) -> Result<Self, KeystoreError> {
         keystore().overwrite_new(key, KeyType::Rsa(bits), access_rules)?;
         Ok(Self(key.to_string()))
