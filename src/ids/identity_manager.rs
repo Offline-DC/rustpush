@@ -976,7 +976,7 @@ impl IdentityResource {
                 _prog = progress.recv() => {
                     received = true;
                 },
-                _time = tokio::time::sleep(Duration::from_millis(if received { 500 } else { 15000 })) => {
+                _time = tokio::time::sleep(Duration::from_millis(if received { 500 } else { 30000 })) => {
                     break;
                 }
             }
