@@ -1,6 +1,6 @@
 use std::{collections::HashSet, path::PathBuf, pin::Pin, process::id, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
 
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use plist::{Data, Dictionary, Value};
 use serde::{Deserialize, Serialize};
 use tokio::{select, sync::{broadcast, Mutex}, task::JoinHandle};
@@ -326,7 +326,7 @@ impl IMClient {
 
         let handle = message.sender.as_ref().unwrap().to_string();
         let ident_cache = self.identity.cache.lock().await;
-        let mut message_targets = if let Some(message_targets) = &message.target {
+        let message_targets = if let Some(message_targets) = &message.target {
             ident_cache.get_targets(topic, &handle, &targets, message_targets)?
         } else {
             ident_cache.get_participants_targets(topic, &handle, &targets)
@@ -334,31 +334,9 @@ impl IMClient {
         drop(ident_cache);
 
         // if we have other people, but not a single target going to not us, we cannot "send" this message.
-        let has_other_recipient = targets.iter().any(|target| !handles.contains(target));
-        if has_other_recipient && !message_targets.iter().any(|target| !handles.contains(&target.participant)) {
-            // No iMessage target resolved for a real recipient. cache_keys above ran with
-            // refresh=false, so a STALE/EMPTY cache entry — a number looked up before it
-            // registered on iMessage, or during a transient IDS failure — would otherwise
-            // keep that recipient stuck as SMS-only and reject tapbacks forever. Force ONE
-            // fresh IDS lookup and re-resolve before giving up.
-            warn!("send: no valid iMessage target for {targets:?} — forcing key refresh + retry");
-            self.identity.cache_keys(
-                topic,
-                &targets,
-                &handle,
-                true,
-                &QueryOptions { required_for_message: true, result_expected: true }
-            ).await?;
-            let ident_cache = self.identity.cache.lock().await;
-            message_targets = if let Some(message_targets) = &message.target {
-                ident_cache.get_targets(topic, &handle, &targets, message_targets)?
-            } else {
-                ident_cache.get_participants_targets(topic, &handle, &targets)
-            };
-            drop(ident_cache);
-            if !message_targets.iter().any(|target| !handles.contains(&target.participant)) {
-                return Err(PushError::NoValidTargets);
-            }
+        if targets.iter().any(|target| !handles.contains(target)) &&
+            !message_targets.iter().any(|target| !handles.contains(&target.participant)) {
+            return Err(PushError::NoValidTargets);
         }
         
         let my_handles = self.identity.get_handles().await;

@@ -229,17 +229,6 @@ impl MacOSConfigRemote {
             hw_config: Some(body.to_vec().into()),
             inner,
         };
-        log::info!(
-            "dumb→config: model={} serial={} build={} mlb={} rom={} macOS={} proto={} uuid={}",
-            cfg.inner.product_name,
-            cfg.inner.platform_serial_number,
-            cfg.inner.os_build_num,
-            cfg.inner.mlb,
-            encode_hex(&<Vec<u8>>::from(cfg.inner.rom.clone())),
-            cfg.version,
-            cfg.protocol_version,
-            cfg.device_id
-        );
         Ok(cfg)
     }
 
