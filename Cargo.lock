@@ -399,9 +399,6 @@ dependencies = [
 name = "clearadi"
 version = "1.0.0"
 dependencies = [
- "android-loader",
- "libc",
- "rand 0.8.5",
  "serde",
 ]
 
