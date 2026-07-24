@@ -27,6 +27,16 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{activation::ActivationInfo, util::{encode_hex, get_bag, REQWEST, plist_to_buf, base64_encode, base64_decode, IDS_BAG}, DebugMeta, OSConfig, PushError, RegisterMeta};
+use prost::Message;
+use rand::Rng;
+
+/// Generated from `mac_hw_info.proto` — OpenBubbles' authoritative schema for the
+/// `dumb` file. Decoding against the real schema (rather than reading field numbers
+/// off a hexdump) is what keeps `rom` = field 11 and `io_mac_address` = field 2
+/// straight; they are DIFFERENT bytes on genuine hardware.
+pub mod bbhwinfo {
+    include!(concat!(env!("OUT_DIR"), "/bbhwinfo.rs"));
+}
 
 /// The subset of the Mac hardware identity the **remote** NAC path needs.
 ///
@@ -100,94 +110,36 @@ struct NacCreateResponse {
     request: String,
 }
 
-/// Minimal protobuf field reader — just enough to pull the dumb's `HwInfo` fields
-/// (length-delimited strings/bytes + varints). Keeps the last value seen per field number
-/// (fine for these singular fields); no external protobuf dependency needed.
-struct ProtoFields {
-    ld: std::collections::HashMap<u64, Vec<u8>>,
-    varint: std::collections::HashMap<u64, u64>,
+/// A fresh client UDID, the same shape OpenBubbles generates
+/// (`openbubbles-app/rust/src/api/api.rs::generate_udid`): 32 random bytes, hex,
+/// uppercase.
+///
+/// Deliberately NOT derived from the Mac's platform UUID. On real hardware the
+/// client UDID and `IOPlatformUUID` are independent values; reusing one for both
+/// asserts an equality genuine hardware never asserts, and makes the resulting
+/// `X-Client-UDID` (see rustpush `auth.rs`, sent on every GSA request) a
+/// dashed UUID where every OpenBubbles client sends 64 hex chars — a one-regex
+/// fleet classifier. This keeps the two indistinguishable.
+pub fn generate_udid() -> String {
+    let udid: [u8; 32] = rand::thread_rng().gen();
+    encode_hex(&udid).to_uppercase()
 }
 
-impl ProtoFields {
-    fn parse(mut buf: &[u8]) -> ProtoFields {
-        fn read_varint(buf: &mut &[u8]) -> Option<u64> {
-            let (mut result, mut shift) = (0u64, 0u32);
-            loop {
-                let (&byte, rest) = buf.split_first()?;
-                *buf = rest;
-                result |= u64::from(byte & 0x7f) << shift;
-                if byte & 0x80 == 0 {
-                    return Some(result);
-                }
-                shift += 7;
-                if shift >= 64 {
-                    return None;
-                }
-            }
-        }
-        let mut f = ProtoFields {
-            ld: std::collections::HashMap::new(),
-            varint: std::collections::HashMap::new(),
-        };
-        while !buf.is_empty() {
-            let Some(key) = read_varint(&mut buf) else { break };
-            let (field, wire) = (key >> 3, key & 7);
-            match wire {
-                0 => match read_varint(&mut buf) {
-                    Some(v) => {
-                        f.varint.insert(field, v);
-                    }
-                    None => break,
-                },
-                1 => {
-                    if buf.len() < 8 {
-                        break;
-                    }
-                    buf = &buf[8..];
-                }
-                2 => {
-                    let Some(len) = read_varint(&mut buf) else { break };
-                    let len = len as usize;
-                    if buf.len() < len {
-                        break;
-                    }
-                    f.ld.insert(field, buf[..len].to_vec());
-                    buf = &buf[len..];
-                }
-                5 => {
-                    if buf.len() < 4 {
-                        break;
-                    }
-                    buf = &buf[4..];
-                }
-                _ => break,
-            }
-        }
-        f
-    }
-    fn bytes(&self, field: u64) -> Option<&[u8]> {
-        self.ld.get(&field).map(Vec::as_slice)
-    }
-    fn string(&self, field: u64) -> Option<String> {
-        self.ld.get(&field).and_then(|v| String::from_utf8(v.clone()).ok())
-    }
-    fn get_varint(&self, field: u64) -> Option<u64> {
-        self.varint.get(&field).copied()
-    }
+/// True when `udid` already has the OpenBubbles shape (64 hex chars). Used to
+/// migrate installs that persisted the old platform-UUID-derived value exactly
+/// once, then leave it alone.
+pub fn is_openbubbles_shaped_udid(udid: &str) -> bool {
+    udid.len() == 64 && udid.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 impl MacOSConfigRemote {
-    /// Build a full config from the OpenBubbles `dumb` body (the DECODED bytes: a 5-byte
-    /// "OABS\0" header + a protobuf `HwInfo`). BOTH the hardware identity (nested field 1)
-    /// and the software identity (top-level version / protocol / device-UUID / iCloud-UA /
-    /// AOSKit) live in the dumb, so os_config.plist is not required. `hw_config` is set to
-    /// the full body so `/nac/create` still receives the exact bytes it expects.
+    /// Build a full config from the OpenBubbles `dumb` body: a 5-byte "OABS\0"
+    /// header followed by a `bbhwinfo.HwInfo` protobuf. Field numbers come from
+    /// `mac_hw_info.proto` — OpenBubbles' authoritative schema — so `rom` is
+    /// field 11 and is never confused with `io_mac_address` (field 2).
     ///
-    /// Field map (confirmed against a real device dump):
-    ///   top    #1 nested HwInfo   #2 macOS version   #3 protocol_version (varint)
-    ///          #4 device UUID      #5 iCloud UA        #6 AOSKit version
-    ///   nested #1 product_name     #2 rom (6 bytes)    #3 serial
-    ///          #7 build number      #13 mlb
+    /// `hw_config` keeps the full body so `/nac/create` still receives the exact
+    /// bytes it expects.
     pub fn from_dumb_body(body: &[u8]) -> Result<MacOSConfigRemote, PushError> {
         fn bad(m: String) -> PushError {
             PushError::IoError(std::io::Error::new(std::io::ErrorKind::InvalidData, m))
@@ -198,38 +150,64 @@ impl MacOSConfigRemote {
                 body.len()
             )));
         }
-        let top = ProtoFields::parse(&body[5..]);
-        let hw_blob = top
-            .bytes(1)
-            .ok_or_else(|| bad("dumb: no nested HwInfo (top field #1)".into()))?;
-        let hw = ProtoFields::parse(hw_blob);
+        let hw_info = bbhwinfo::HwInfo::decode(&body[5..])
+            .map_err(|e| bad(format!("dumb: protobuf decode failed: {e}")))?;
+        let inner = hw_info
+            .inner
+            .ok_or_else(|| bad("dumb: no nested HwInfo (field #1)".into()))?;
 
-        let need = |f: &ProtoFields, n: u64, what: &str| -> Result<String, PushError> {
-            f.string(n).ok_or_else(|| bad(format!("dumb: missing {what} (field #{n})")))
+        // proto3 yields empty defaults rather than errors, so the fields we
+        // genuinely require are checked explicitly.
+        let require = |v: String, what: &str| -> Result<String, PushError> {
+            if v.is_empty() { Err(bad(format!("dumb: missing {what}"))) } else { Ok(v) }
         };
-        let inner = HardwareConfig {
-            product_name: need(&hw, 1, "product_name")?,
-            platform_serial_number: need(&hw, 3, "serial")?,
-            os_build_num: need(&hw, 7, "build number")?,
-            mlb: need(&hw, 13, "mlb")?,
-            rom: hw
-                .bytes(2)
-                .ok_or_else(|| bad("dumb: missing rom (nested field #2)".into()))?
-                .to_vec()
-                .into(),
-        };
-        let device_id = need(&top, 4, "device UUID")?;
-        let cfg = MacOSConfigRemote {
-            version: need(&top, 2, "macOS version")?,
-            protocol_version: top.get_varint(3).unwrap_or(1640) as u32,
-            icloud_ua: need(&top, 5, "iCloud UA")?,
-            aoskit_version: need(&top, 6, "AOSKit version")?,
-            udid: Some(device_id.clone()),
+        if inner.rom.is_empty() {
+            return Err(bad("dumb: missing rom (field #11)".into()));
+        }
+
+        let device_id = require(hw_info.device_id, "device UUID")?;
+        Ok(MacOSConfigRemote {
+            inner: HardwareConfig {
+                product_name: require(inner.product_name, "product_name")?,
+                platform_serial_number: require(inner.platform_serial_number, "serial")?,
+                os_build_num: require(inner.os_build_num, "build number")?,
+                mlb: require(inner.mlb, "mlb")?,
+                // Field 11. NOT io_mac_address (field 2) — verified distinct on a
+                // real MacBookPro16,2 dump (f2 147dda3f5864 vs f11 8e04522f5881).
+                rom: inner.rom.into(),
+            },
+            version: require(hw_info.version, "macOS version")?,
+            protocol_version: if hw_info.protocol_version == 0 {
+                1640
+            } else {
+                hw_info.protocol_version as u32
+            },
+            icloud_ua: require(hw_info.icloud_ua, "iCloud UA")?,
+            aoskit_version: require(hw_info.aoskit_version, "AOSKit version")?,
+            // NOT device_id — see generate_udid(). Callers persist this so it is
+            // stable across launches; a UDID that changes every start would look
+            // like a brand-new device to Apple on every sign-in.
+            udid: Some(generate_udid()),
             device_id,
             hw_config: Some(body.to_vec().into()),
-            inner,
-        };
-        Ok(cfg)
+        })
+    }
+
+    /// Diagnostic: the two 6-byte fields that were historically confused —
+    /// `rom` (field 11, the one that belongs in `X-Apple-I-ROM`) and
+    /// `io_mac_address` (field 2). Both are decoded straight from the stored dumb
+    /// body with the real schema, so a log line can PROVE which one the GSA
+    /// header is carrying rather than just printing a value.
+    ///
+    /// Returns `(rom_hex, io_mac_hex)`, lowercase, matching
+    /// [`OSConfig::get_gsa_hardware_headers`]'s encoding.
+    pub fn rom_and_io_mac_hex(&self) -> Option<(String, String)> {
+        let body: Vec<u8> = self.hw_config.clone()?.into();
+        if body.len() <= 5 {
+            return None;
+        }
+        let inner = bbhwinfo::HwInfo::decode(&body[5..]).ok()?.inner?;
+        Some((encode_hex(&inner.rom), encode_hex(&inner.io_mac_address)))
     }
 
     /// The raw hardware-config bytes for `/nac/create`: the inline `hw_config` if
