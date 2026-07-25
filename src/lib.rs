@@ -49,7 +49,7 @@ pub use imessage::messages::{TypingApp, SetTranscriptBackgroundMessage, UpdatePr
 pub use imessage::aps_client::{IMClient, MADRID_SERVICE};
 
 pub use util::{encode_hex, get_bag, plist_to_buf, base64_encode, base64_decode, REQWEST, IDS_BAG, NSArrayClass, EntitlementsResponse, EntitlementAuthState, ResourceState, NSDictionaryClass, NSURL, NSArray, ResourceFailure, NSAttributedString, NSString, NSDictionaryTypedCoder, NSNumber, coder_encode_flattened, coder_decode_flattened, StCollapsedValue};
-pub use ids::user::{IDSUser, register, IDSUserIdentity, IDSNGMIdentity, PrivateDeviceInfo, SupportAlert, SupportAction, ReportMessage};
+pub use ids::user::{IDSUser, register, IDSUserIdentity, IDSNGMIdentity, PrivateDeviceInfo, SupportAlert, SupportAction, ReportMessage, IDSService};
 pub use ids::identity_manager::{SendJob, MessageTarget, IdentityManager, KeyCache};
 pub use ids::CertifiedContext;
 pub use auth::{authenticate_apple, login_apple_delegates, authenticate_phone, authenticate_smsless, AuthPhone, LoginDelegate, CircleClientSession, TokenProvider};
