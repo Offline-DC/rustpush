@@ -1207,6 +1207,17 @@ pub struct APSConnectionResource {
 
 const APNS_PORT: u16 = 5223;
 
+/// Hard bound on opening the APNs socket. `open_socket` performs FIVE unguarded
+/// network operations (two `get_bag` HTTPS fetches, a blocking `to_socket_addrs`
+/// DNS resolve, a TCP connect and a TLS handshake) and none of them has its own
+/// timeout, so on a blackholed path they can hang for minutes.
+///
+/// 15s deliberately MATCHES the `.connect_timeout(15s)` this fork already sets on the
+/// shared REQWEST client (util.rs), which is what bounds the two `get_bag` fetches.
+/// A shorter value here would preempt that on a slow-but-working network and turn a
+/// successful reconnect into a retry loop.
+const OPEN_SOCKET_TIMEOUT: Duration = Duration::from_secs(15);
+
 async fn open_socket() -> Result<(TlsStream<TcpStream>, Option<APSPackedEncoder>, Option<APSPackedDecoder>), PushError> {
     let certs = rustls_pemfile::certs(&mut Cursor::new(include_bytes!("../certs/root/profileidentity.ess.apple.com.cert")))?;
 
@@ -1255,11 +1266,22 @@ async fn open_socket() -> Result<(TlsStream<TcpStream>, Option<APSPackedEncoder>
 impl Resource for APSConnectionResource {
     async fn generate(self: &Arc<Self>) -> Result<JoinHandle<()>, PushError> {
         info!("Generating APS");
-        let (socket, encoder, mut decoder) = match open_socket().await {
-            Ok(e) => e,
-            Err(err) => {
+        // One timeout at the CALL SITE rather than five inside `open_socket`: it also
+        // covers the blocking `to_socket_addrs` DNS resolve, which cannot be cancelled
+        // by wrapping it further in because it blocks the worker thread instead of
+        // yielding. Without this, a half-open socket (AP or NAT silently dropped the
+        // flow, no FIN/RST) hangs the whole resource regeneration and the only thing
+        // that eventually breaks it is the ResourceManager's `generate_timeout`.
+        let (socket, encoder, mut decoder) = match tokio::time::timeout(OPEN_SOCKET_TIMEOUT, open_socket()).await {
+            Ok(Ok(e)) => e,
+            Ok(Err(err)) => {
                 error!("failed to connect to socket {err}!");
                 return Err(err);
+            }
+            Err(_) => {
+                error!("APS open_socket timed out after {}s (blackholed path?) — failing \
+                    regeneration so the backoff can retry with a fresh socket", OPEN_SOCKET_TIMEOUT.as_secs());
+                return Err(PushError::SendTimedOut);
             }
         };
         info!("Generating Opened socket");
@@ -1331,7 +1353,19 @@ impl APSConnectionResource {
             ExponentialBuilder::default()
                 .with_max_delay(Duration::from_secs(30))
                 .with_max_times(usize::MAX),
-            Duration::from_secs(300),
+            // Backstop for any hang NOT covered by an inner guard. This was 300s,
+            // which meant a stuck reconnect went undetected for a full five minutes
+            // while the app sat there looking connected. Every step inside generate()
+            // now has its own bound — open_socket 10s, ConnectResponse 15s
+            // (do_connect), topic filter 10s — so 45s is generous for a legitimately
+            // slow reconnect on bad cell while capping the blind spot. A timeout here
+            // is not fatal: it flows into the backoff above (1s min, 30s cap, retry
+            // forever), so the cost of being wrong is one extra reconnect attempt.
+            // 60 not 45: worst legitimate case inside generate() is open_socket (15s)
+            // + do_connect, and do_connect can include a full `activate()` HTTP round
+            // trip on a device with no stored keypair before its own 15s
+            // ConnectResponse wait. 45s could clip a first-ever activation.
+            Duration::from_secs(60),
             ok
         );
 
@@ -1363,9 +1397,9 @@ impl APSConnectionResource {
                 let Some(upgrade) = keep_alive_ref.upgrade() else { break };
                 let waiter = upgrade.subscribe().await;
                 if let Ok(_) = upgrade.send(APSMessage::Ping).await {
-                    let _ = upgrade.wait_for_timeout(waiter, |msg| {
+                    let _ = upgrade.wait_for_timeout_named(waiter, |msg| {
                         if let APSMessage::Pong = msg { Some(()) } else { None }
-                    }).await;
+                    }, "keepalive-pong").await;
                 }
             }
         });
@@ -1442,7 +1476,7 @@ impl APSConnectionResource {
 
         info!("Waiting for connect response");
         let (token, status) = 
-            self.wait_for_timeout(recv, |msg| if let APSMessage::ConnectResponse { token, status } = msg { Some((token, status)) } else { None }).await?;
+            self.wait_for_timeout_named(recv, |msg| if let APSMessage::ConnectResponse { token, status } = msg { Some((token, status)) } else { None }, "connect-response").await?;
         
         if status != 0 {
             // don't invalidate pair, that results in shifting our token
@@ -1474,10 +1508,10 @@ impl APSConnectionResource {
             payload: plist::to_value(&data)?,
             channel: None,
         }).await?;
-        let status = self.wait_for_timeout(self.subscribe().await, |msg| {
+        let status = self.wait_for_timeout_named(self.subscribe().await, |msg| {
             let APSMessage::Ack { token: _token, for_id: _, status } = msg else { return None };
             Some(status)
-        }).await?;
+        }, &format!("ack topic={topic}")).await?;
         if status != 0 {
             Err(PushError::APSAckError(status))
         } else {
@@ -1491,11 +1525,22 @@ impl APSConnectionResource {
 
     pub async fn wait_for_timeout<F, T>(&self, recv: impl BorrowMut<Receiver<APSMessage>>, f: F) -> Result<T, PushError>
     where F: FnMut(APSMessage) -> Option<T> {
+        self.wait_for_timeout_named(recv, f, "unlabeled").await
+    }
+
+    /// Same as [`wait_for_timeout`], but names the call site in the error log.
+    ///
+    /// "Send timed out, forcing reload!" is emitted from nine different places. Without
+    /// a label there is no way to tell a dead keepalive from a stalled connect handshake
+    /// from an unacked cache flush when reading an exported log after the fact — they
+    /// are byte-identical lines.
+    pub async fn wait_for_timeout_named<F, T>(&self, recv: impl BorrowMut<Receiver<APSMessage>>, f: F, what: &str) -> Result<T, PushError>
+    where F: FnMut(APSMessage) -> Option<T> {
         let value = tokio::time::timeout(Duration::from_secs(15), self.wait_for(recv, f)).await.map_err(|_e| PushError::SendTimedOut).and_then(|e| e);
 
         if value.is_err() {
             // request reload
-            error!("Send timed out, forcing reload!");
+            error!("Send timed out ({what}), forcing reload!");
             self.do_reload().await;
         }
 
