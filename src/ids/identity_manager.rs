@@ -779,7 +779,15 @@ impl IdentityResource {
         // low-RAM devices): this is the one line that distinguishes "a peer's
         // message never reached us" from "it reached us and we ate it". Every
         // silent-receive investigation needs that distinction first.
-        info!(
+        // Routine per-target send-acknowledgements (cmd 255, and 97) arrive
+        // with no sender and no body — one per target, so a 37-target send
+        // produced ~37 of them. They can never be the inbound message someone
+        // is missing, so they log at debug; everything that carries a sender
+        // OR a body stays at info. Measured on a 2026-07-31 capture: this is
+        // 280 of 404 notifications, and dropping them takes the whole feature
+        // from 13% of the file to 2%.
+        let routine_ack = payload.sender.is_none() && payload.message.is_none();
+        let render = format!(
             "IDS RX cmd={} topic={} from={} to={} uuid={} enc={} body={}B tok={}",
             payload.command,
             topic,
@@ -792,6 +800,7 @@ impl IdentityResource {
                 .map(|t| encode_hex(&t[..4.min(t.len())]))
                 .unwrap_or_else(|| "-".into()),
         );
+        if routine_ack { debug!("{render}") } else { info!("{render}") }
 
         if let IDSRecvMessage {
             sender: Some(sender),
@@ -845,20 +854,6 @@ impl IdentityResource {
 
         let ident_cache = self.cache.lock().await;
 
-        // Per-participant device counts, as ONE line per send rather than one
-        // per participant — this runs on every outbound including read and
-        // delivery receipts, so a line each would be the single noisiest
-        // addition here for no extra information.
-        //
-        // The send path otherwise only logs a "to N targets" total, which
-        // hides the case that matters: one participant in a group resolving to
-        // zero devices while the others look healthy. A `:0` in this list is
-        // the smoking gun for "this person will never receive what we send".
-        let counts = targets.iter()
-            .map(|p| format!("{p}:{}", ident_cache.get_keys(topic, handle, p).len()))
-            .collect::<Vec<_>>()
-            .join(" ");
-        info!("IDS TARGETS {handle} → [{counts}]");
 
         Ok(ident_cache.get_participants_targets(topic, &handle, &targets))
     }

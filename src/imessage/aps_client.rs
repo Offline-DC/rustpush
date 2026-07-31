@@ -208,6 +208,7 @@ impl IMClient {
             // Captured before process_msg takes ownership, so the non-Ok(Some)
             // arms can still say which peer and command they came from.
             let (rx_cmd, rx_from) = (received.command, received.sender.clone());
+            let rx_had_body = received.message.is_some() || received.message_unenc.is_some();
             let recieved = self.process_msg(received).await;
             // Previously only the Ok(Some) arm logged, so a message that was
             // received and then dropped was indistinguishable from one that
@@ -216,7 +217,11 @@ impl IMClient {
                 // .redacted() not Display: message bodies must never reach a
                 // support bundle. Structure and a salted hash only.
                 Ok(Some(recieved)) => info!("recieved {}", recieved.redacted()),
-                Ok(None) => info!("IDS RX cmd={rx_cmd} from={rx_from:?} — consumed, no user-visible message"),
+                // Same split as the DROP above: a bodyless control message
+                // being consumed is normal and goes to debug; anything that
+                // carried a body and still produced nothing is worth seeing.
+                Ok(None) if rx_had_body => info!("IDS RX cmd={rx_cmd} from={rx_from:?} — had a body, produced no message"),
+                Ok(None) => debug!("IDS RX cmd={rx_cmd} from={rx_from:?} — consumed, no user-visible message"),
                 Err(e) => warn!("IDS RX cmd={rx_cmd} from={rx_from:?} — failed: {e}"),
             }
             recieved
@@ -311,15 +316,21 @@ impl IMClient {
         }
 
         if payload.message_unenc.is_none() {
+            // Only a *failure* if there was an encrypted body to begin with.
+            // Control traffic (send-acks, cmd 255/97) legitimately arrives
+            // with no body at all — warning on those made 270 lines of
+            // healthy operation look like dropped messages.
             // Silent until now. An encrypted body arrived and decryption
             // produced nothing — verification_failed tells you whether that
             // was an identity miss (see "No identity for payload!") or the
             // payload simply had no body to begin with.
-            warn!("IDS DROP cmd={} from={} uuid={} — no decrypted body (verification_failed={})",
-                command,
-                payload.sender.as_deref().unwrap_or("-"),
-                payload.uuid.as_ref().map(|u| encode_hex(u)).unwrap_or_else(|| "-".into()),
-                payload.verification_failed);
+            if payload.message.is_some() {
+                warn!("IDS DROP cmd={} from={} uuid={} — encrypted body did not decrypt (verification_failed={})",
+                    command,
+                    payload.sender.as_deref().unwrap_or("-"),
+                    payload.uuid.as_ref().map(|u| encode_hex(u)).unwrap_or_else(|| "-".into()),
+                    payload.verification_failed);
+            }
             if let Some(context) = payload.certified_context() {
                 // we weren't delivered, but we got this
                 self.identity.certify_delivery("com.apple.madrid", &context, false).await?;
@@ -372,6 +383,17 @@ impl IMClient {
         } else {
             ident_cache.get_participants_targets(topic, &handle, &targets)
         };
+        // Per-participant device counts, one line per send. This lives here
+        // rather than in targets_for_handles because THIS is the path send()
+        // actually takes (cache_keys + get_participants_targets directly) —
+        // the version in targets_for_handles never fired once across a 7-hour
+        // capture. A `:0` here means that participant resolves to no devices
+        // and cannot receive anything we send.
+        let target_counts = targets.iter()
+            .map(|p| format!("{p}:{}", ident_cache.get_keys(topic, &handle, p).len()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        info!("IDS TARGETS {handle} → [{target_counts}]");
         drop(ident_cache);
 
         // if we have other people, but not a single target going to not us, we cannot "send" this message.
