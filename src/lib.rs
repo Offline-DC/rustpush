@@ -45,6 +45,9 @@ use async_trait::async_trait;
 pub use auth::{request_update_account, UpdateAccountFinish};
 pub use mmcs::{FileContainer, prepare_put};
 pub use omnisette::AnisetteProvider;
+// redact_text: log-safe rendering of user text, used by smarttxt-ffi's own
+// log sites so bundles never carry message bodies. See messages.rs.
+pub use imessage::messages::redact_text;
 pub use imessage::messages::{TypingApp, SetTranscriptBackgroundMessage, UpdateProfileMessage, UpdateProfileSharingMessage, MessageInst, ShareProfileMessage, SharedPoster, ScheduleMode, PermanentDeleteMessage, OperatedChat, DeleteTarget, MoveToRecycleBinMessage, TextFormat, TextEffect, TextFlags, LinkMeta, LPLinkMetadata, LPSpecializationMetadata, ReactMessageType, ErrorMessage, Reaction, UnsendMessage, EditMessage, UpdateExtensionMessage, PartExtension, ReactMessage, ChangeParticipantMessage, LPImageMetadata, RichLinkImageAttachmentSubstitute, LPIconMetadata, AttachmentType, ExtensionApp, BalloonLayout, Balloon, ConversationData, Message, MessageType, Attachment, NormalMessage, RenameMessage, IconChangeMessage, MessageParts, MessagePart, MMCSFile, IndexedMessagePart};
 pub use imessage::aps_client::{IMClient, MADRID_SERVICE};
 

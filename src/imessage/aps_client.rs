@@ -1,6 +1,6 @@
 use std::{collections::HashSet, path::PathBuf, pin::Pin, process::id, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
 
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use plist::{Data, Dictionary, Value};
 use serde::{Deserialize, Serialize};
 use tokio::{select, sync::{broadcast, Mutex}, task::JoinHandle};
@@ -188,6 +188,10 @@ impl IMClient {
 
     pub async fn handle(&self, msg: APSMessage) -> Result<Option<MessageInst>, PushError> {
         if self.identity.handle(msg.clone()).await? {
+            // Apple telling us our identity cache is stale. Worth recording:
+            // it dates the moment our view of a peer's devices was refreshed,
+            // which is the other half of any "why didn't this arrive" timeline.
+            info!("IDS PeerCacheInvalidate — Apple says our identity cache is stale");
             return Ok(Some(MessageInst {
                 id: Uuid::new_v4().to_string(),
                 sender: None,
@@ -201,8 +205,20 @@ impl IMClient {
             }))
         }
         if let Some(received) = self.identity.receive_message(msg, &["com.apple.madrid", "com.apple.private.alloy.sms"]).await? {
+            // Captured before process_msg takes ownership, so the non-Ok(Some)
+            // arms can still say which peer and command they came from.
+            let (rx_cmd, rx_from) = (received.command, received.sender.clone());
             let recieved = self.process_msg(received).await;
-            if let Ok(Some(recieved)) = &recieved { info!("recieved {recieved}"); }
+            // Previously only the Ok(Some) arm logged, so a message that was
+            // received and then dropped was indistinguishable from one that
+            // never arrived. All three arms now leave a trace.
+            match &recieved {
+                // .redacted() not Display: message bodies must never reach a
+                // support bundle. Structure and a salted hash only.
+                Ok(Some(recieved)) => info!("recieved {}", recieved.redacted()),
+                Ok(None) => info!("IDS RX cmd={rx_cmd} from={rx_from:?} — consumed, no user-visible message"),
+                Err(e) => warn!("IDS RX cmd={rx_cmd} from={rx_from:?} — failed: {e}"),
+            }
             recieved
         } else {
             Ok(None)
@@ -250,6 +266,10 @@ impl IMClient {
             target: Some(target),
             ..
         } = &payload {
+            // A peer telling us THEY could not decrypt something we sent.
+            // The closest we ever get to seeing the far side's failures, so
+            // it belongs in the log rather than only in the cache mutation.
+            warn!("IDS 120 ERROR from={sender} to={target} for={for_str} status={error_status} str={error_string}");
             if error_string == "ec-com.apple.messageprotection-802" {
                 // refreshing identity cache can fix this
                 let mut cache_lock = self.identity.cache.lock().await;
@@ -270,6 +290,7 @@ impl IMClient {
             token: Some(sender_token),
             ..
         } = &payload {
+            info!("IDS 130 invalidate target={target} sender={sender}");
             let mut cache_lock = self.identity.cache.lock().await;
             cache_lock.invalidate(&target, &sender);
             return Ok(None)
@@ -290,6 +311,15 @@ impl IMClient {
         }
 
         if payload.message_unenc.is_none() {
+            // Silent until now. An encrypted body arrived and decryption
+            // produced nothing — verification_failed tells you whether that
+            // was an identity miss (see "No identity for payload!") or the
+            // payload simply had no body to begin with.
+            warn!("IDS DROP cmd={} from={} uuid={} — no decrypted body (verification_failed={})",
+                command,
+                payload.sender.as_deref().unwrap_or("-"),
+                payload.uuid.as_ref().map(|u| encode_hex(u)).unwrap_or_else(|| "-".into()),
+                payload.verification_failed);
             if let Some(context) = payload.certified_context() {
                 // we weren't delivered, but we got this
                 self.identity.certify_delivery("com.apple.madrid", &context, false).await?;
@@ -299,13 +329,24 @@ impl IMClient {
 
         match MessageInst::from_raw(payload.message_unenc.take().unwrap().plist()?, &payload, &self.conn).await {
             Err(PushError::BadMsg) => {
+                // Also silent until now: we decrypted a body and then failed
+                // to parse it. Very different from never receiving it, and
+                // worth distinguishing when a peer reports missing messages.
+                warn!("IDS DROP cmd={} from={} uuid={} — body decrypted but unparseable",
+                    command,
+                    payload.sender.as_deref().unwrap_or("-"),
+                    payload.uuid.as_ref().map(|u| encode_hex(u)).unwrap_or_else(|| "-".into()));
                 if let Some(context) = payload.certified_context() {
                     // we weren't delivered, but we got this
                     self.identity.certify_delivery("com.apple.madrid", &context, false).await?;
                 }
                 Ok(None)
             },
-            Err(err) => Err(err),
+            Err(err) => {
+                warn!("IDS ERR cmd={} from={} — {err}",
+                    command, payload.sender.as_deref().unwrap_or("-"));
+                Err(err)
+            },
             Ok(msg) => Ok(Some(msg))
         }
     }

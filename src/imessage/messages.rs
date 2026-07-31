@@ -1755,6 +1755,71 @@ impl Message {
     }
 }
 
+/// Per-process salt for [redact_text]. Random and never persisted, so the
+/// same message text hashes differently in every capture — a support bundle
+/// can't be dictionary-attacked to recover short messages ("ok", "yes",
+/// "Text test" are trivially brute-forced against an unsalted digest).
+///
+/// The trade-off is deliberate: correlation works WITHIN one process run
+/// (which is what "is this the same message being redelivered?" needs) but
+/// not across a restart, and not across two different devices' bundles.
+static LOG_SALT: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
+
+fn log_salt() -> &'static [u8; 16] {
+    LOG_SALT.get_or_init(|| {
+        let mut s = [0u8; 16];
+        // openssl rather than `rand` so this doesn't depend on which rand
+        // major version the tree is pinned to.
+        let _ = openssl::rand::rand_bytes(&mut s);
+        s
+    })
+}
+
+/// Render user-authored text as a length plus a salted fingerprint, never the
+/// text itself.
+///
+/// Support bundles get shared — with teammates, and (as of the 2026-07-31
+/// group-receive investigation) with outside engineers. They should not carry
+/// customers' message contents. What diagnosis actually needs from a message
+/// body is "is this the same one I saw a minute ago?" and "roughly how big",
+/// both of which survive hashing; the words never mattered.
+pub fn redact_text(text: &str) -> String {
+    let mut buf = Vec::with_capacity(16 + text.len());
+    buf.extend_from_slice(log_salt());
+    buf.extend_from_slice(text.as_bytes());
+    format!("len={} h={}", text.chars().count(), &encode_hex(&sha256(&buf))[..8])
+}
+
+impl Message {
+    /// Log-safe description: same shape as [Display], but every field a user
+    /// typed is replaced by [redact_text]. Use this for anything that reaches
+    /// logcat or an export bundle; keep Display for UI.
+    ///
+    /// Handles (phone numbers / emails) are deliberately NOT redacted — they
+    /// already appear as `sender=` / `counterparts=` throughout the log and
+    /// are what makes a bundle diagnosable at all.
+    pub fn redacted(&self) -> String {
+        match self {
+            Message::Message(msg) => format!("message {}", redact_text(&msg.parts.raw_text())),
+            Message::React(msg) => format!("react {}", redact_text(&msg.get_text())),
+            Message::Edit(e) => format!("edit {}", redact_text(&e.new_parts.raw_text())),
+            Message::RenameMessage(msg) => format!("renamed chat {}", redact_text(&msg.new_name)),
+            // Every remaining variant is structural (delivered / read / typing
+            // / errors / profile + participant changes) and carries no
+            // user-authored text, so Display is already log-safe.
+            other => format!("{other}"),
+        }
+    }
+}
+
+impl MessageInst {
+    /// Log-safe counterpart to this type's [Display] — same `[sender] body`
+    /// shape, with the body hashed. See [Message::redacted].
+    pub fn redacted(&self) -> String {
+        format!("[{}] {}", self.sender.clone().unwrap_or("unknown".to_string()), self.message.redacted())
+    }
+}
+
 impl fmt::Display for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

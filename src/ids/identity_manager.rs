@@ -773,6 +773,26 @@ impl IdentityResource {
 
         payload.topic = *topic;
 
+        // Fires for EVERY inbound IDS notification, before any decision to
+        // decrypt, drop or dispatch. Deliberately separate from the debug!
+        // above (which dumps the whole payload and drowns the log buffer on
+        // low-RAM devices): this is the one line that distinguishes "a peer's
+        // message never reached us" from "it reached us and we ate it". Every
+        // silent-receive investigation needs that distinction first.
+        info!(
+            "IDS RX cmd={} topic={} from={} to={} uuid={} enc={} body={}B tok={}",
+            payload.command,
+            topic,
+            payload.sender.as_deref().unwrap_or("-"),
+            payload.target.as_deref().unwrap_or("-"),
+            payload.uuid.as_ref().map(|u| encode_hex(u)).unwrap_or_else(|| "-".into()),
+            payload.encryption.as_deref().unwrap_or("none"),
+            payload.message.as_ref().map(|m| m.len()).unwrap_or(0),
+            payload.token.as_ref()
+                .map(|t| encode_hex(&t[..4.min(t.len())]))
+                .unwrap_or_else(|| "-".into()),
+        );
+
         if let IDSRecvMessage {
             sender: Some(sender),
             target: Some(target),
@@ -787,7 +807,11 @@ impl IdentityResource {
             let ident = match self.get_key_for_sender(*topic, &target, &encryption, &sender, &token).await {
                 Ok(ident) => Some(ident),
                 Err(err) => {
-                    error!("No identity for payload! {}", err);
+                    // Name the peer. Without the sender this tells you an
+                    // identity lookup failed but not whose, which is useless
+                    // in a group where only one participant is affected.
+                    error!("No identity for payload! sender={sender} enc={encryption} tok={} — {}",
+                        encode_hex(&token[..4.min(token.len())]), err);
                     *verification_failed = true;
                     None
                 }
@@ -820,6 +844,22 @@ impl IdentityResource {
         ).await?;
 
         let ident_cache = self.cache.lock().await;
+
+        // Per-participant device counts, as ONE line per send rather than one
+        // per participant — this runs on every outbound including read and
+        // delivery receipts, so a line each would be the single noisiest
+        // addition here for no extra information.
+        //
+        // The send path otherwise only logs a "to N targets" total, which
+        // hides the case that matters: one participant in a group resolving to
+        // zero devices while the others look healthy. A `:0` in this list is
+        // the smoking gun for "this person will never receive what we send".
+        let counts = targets.iter()
+            .map(|p| format!("{p}:{}", ident_cache.get_keys(topic, handle, p).len()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        info!("IDS TARGETS {handle} → [{counts}]");
+
         Ok(ident_cache.get_participants_targets(topic, &handle, &targets))
     }
 
@@ -836,13 +876,27 @@ impl IdentityResource {
         let cache = self.cache.lock().await;
         let keys = cache.get_keys(&topic, handle, sender);
         let Some(my_key) = keys.iter().find(|key| key.push_token == sender_token) else {
-            warn!("No public key for token retry {is_retry}");
+            // "cache holds N key(s)" separates "we know this handle but not
+            // this device" (N > 0 — the device list is stale) from "we know
+            // nothing about this handle at all" (N == 0).
+            warn!("No public key for {sender} tok={} (retry={is_retry}) — cache holds {} key(s) for this handle",
+                encode_hex(&sender_token[..4.min(sender_token.len())]), keys.len());
             return Err(PushError::KeyNotFound(sender.to_string()))
         };
 
         if encryption == "pair-ec" {
             if my_key.get_device_key().is_none() || my_key.client_data.public_message_ngm_device_prekey_data_key.is_none() {
-                warn!("Pair-EC config not found for retry {is_retry}");
+                // Report the two fields separately. This is the "device is
+                // enumerable but not encryptable-to" state: the peer resolves
+                // and can route unencrypted receipts (cmd 101) to it, but has
+                // no usable NGM/pair-ec material to encrypt a real message.
+                // Seeing ngm_prekey=false here is us hitting, in the outbound
+                // direction, the same failure a peer hits sending to a device
+                // that registered recently.
+                warn!("Pair-EC config not found for {sender} tok={} (retry={is_retry}): device_key={} ngm_prekey={}",
+                    encode_hex(&sender_token[..4.min(sender_token.len())]),
+                    my_key.get_device_key().is_some(),
+                    my_key.client_data.public_message_ngm_device_prekey_data_key.is_some());
                 return Err(PushError::KeyNotFound(sender.to_string()))
             }
         }
