@@ -10,3 +10,15 @@
 	# all. That makes this a required clone on every machine and in CI, and CI
 	# runners have no SSH key. It's a public repo; HTTPS clones anonymously.
 	url = https://github.com/OpenBubbles/OpenAbsinthe-Stub.git
+[submodule "third_party/rtc"]
+	path = third_party/rtc
+	url = https://github.com/OpenBubbles/rtc.git
+[submodule "third_party/rustls"]
+	path = third_party/rustls
+	url = https://github.com/OpenBubbles/rustls.git
+[submodule "third_party/rustls-platform-verifier"]
+	path = third_party/rustls-platform-verifier
+	url = https://github.com/OpenBubbles/rustls-platform-verifier.git
+[submodule "third_party/quinn"]
+	path = third_party/quinn
+	url = https://github.com/OpenBubbles/quinn.git
