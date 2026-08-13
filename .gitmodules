@@ -1,5 +1,5 @@
 [submodule "apple-private-apis"]
-	path = apple-private-apis
+	path = third_party/apple-private-apis
 	url = https://github.com/Offline-DC/apple-private-apis.git
 [submodule "open-absinthe"]
 	path = open-absinthe
