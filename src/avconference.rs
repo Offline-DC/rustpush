@@ -771,7 +771,7 @@ impl AVSessionState {
         ].concat();
         hk.expand(&info, &mut key).unwrap();
 
-        let decrypt = decrypt(Cipher::from_nid(Nid::ID_AES256_WRAP).unwrap(), &key, None, &material[65..])?;
+        let decrypt = decrypt(Cipher::from_nid(Nid::ID_AES256_WRAP).unwrap(), &key, Some(&AES_KEY_WRAP_DEFAULT_IV), &material[65..])?;
         Ok(decrypt)
     }
 
@@ -898,9 +898,15 @@ pub struct QuickRelayPreKey {
     pub creation_date: f64,
 }
 
+/// RFC 3394 default initial value for AES key wrap. OpenSSL substitutes this when
+/// the IV is NULL, but openssl 0.10.81's `Crypter::new` asserts an IV is present
+/// for any cipher with a nonzero `iv_len()` (AES-WRAP reports 8), so we pass it
+/// explicitly. Wire-identical to the NULL-IV path.
+const AES_KEY_WRAP_DEFAULT_IV: [u8; 8] = [0xa6; 8];
+
 fn aes_256_wrap_encrypt(key: &[u8], material: &[u8]) -> Result<Vec<u8>, PushError> {
     let cipher = Cipher::from_nid(Nid::ID_AES256_WRAP).unwrap();
-    let mut crypter = Crypter::new(cipher, Mode::Encrypt, key, None)?;
+    let mut crypter = Crypter::new(cipher, Mode::Encrypt, key, Some(&AES_KEY_WRAP_DEFAULT_IV))?;
 
     let mut out = vec![0; material.len() + cipher.block_size() + 8];
     let count = crypter.update(material, &mut out)?;
