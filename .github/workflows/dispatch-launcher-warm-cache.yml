@@ -1,0 +1,58 @@
+# Tell the launcher repo to re-warm its CI caches.
+#
+# The launcher's release builds (Offline-DC/launcher, release.yml and
+# beta-release.yml) don't compile this repo's native code on the hot path: they
+# restore a prebuilt .so from the GitHub Actions cache, keyed on a hash of the
+# sources listed under `paths:` below. When those change, the key changes, and
+# the next release build falls back to a cold cargo cross-compile (~8 minutes
+# on a 2-vCPU runner) -- unless the launcher's `Warm CI cache` workflow has run
+# in between and written the new key.
+#
+# That workflow can't see pushes here, so this one tells it. It sends a
+# `repository_dispatch` event of type `warm-cache`; the warmer rebuilds both
+# launcher channels, so one event is enough.
+#
+# Needs a secret `LAUNCHER_DISPATCH_TOKEN`: a fine-grained PAT scoped to the
+# Offline-DC/launcher repository with "Contents: read and write" (that is the
+# permission repository_dispatch requires). The default GITHUB_TOKEN is scoped
+# to THIS repo and cannot send events to another one.
+#
+# Lives on `master` only; that is the only rustpush ref the launcher floats on.
+name: Dispatch launcher cache warm
+
+on:
+  push:
+    # No paths filter: the launcher's beta channel builds rustpush `master` and
+    # hashes the resolved SHA (plus every submodule SHA) into its cache key, so
+    # ANY commit here moves that key. The stable channel pins a SHA in
+    # launcher/.github/actions/build-smarttxt-so/action.yml and is unaffected
+    # until someone bumps it there.
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  # A burst of pushes should produce one warm, not five. The warmer has its own
+  # non-cancelling concurrency group, so a second dispatch just queues there.
+  group: dispatch-launcher-warm-cache
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Send repository_dispatch to Offline-DC/launcher
+        env:
+          GH_TOKEN: ${{ secrets.LAUNCHER_DISPATCH_TOKEN }}
+          REASON: "${{ github.repository }}@${{ github.ref_name }} ${{ github.sha }}"
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::LAUNCHER_DISPATCH_TOKEN is not set; cannot ask the launcher to warm its cache."
+            echo "Add a fine-grained PAT (Offline-DC/launcher, Contents: read+write) as that secret."
+            exit 1
+          fi
+          gh api --method POST /repos/Offline-DC/launcher/dispatches \
+            -f event_type=warm-cache \
+            -f "client_payload[reason]=$REASON"
+          echo "dispatched warm-cache to Offline-DC/launcher ($REASON)"
