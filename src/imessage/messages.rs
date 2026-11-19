@@ -2396,7 +2396,7 @@ impl MessageInst {
                                 recieved_number: using_number.replace("tel:", ""),
                                 format,
                                 mime_type: None,
-                                constant_uuid: Uuid::new_v4().to_string().to_uppercase(),
+                                constant_uuid: Some(Uuid::new_v4().to_string().to_uppercase()),
                                 r: true,
                                 content,
                                 ssc: 0,
@@ -2404,7 +2404,7 @@ impl MessageInst {
                                 version: "1".to_string(),
                                 sc: Some(0),
                                 mode: if is_mms { "mms".to_string() } else { "sms".to_string() },
-                                ic: 1,
+                                ic: Some(1),
                                 n: Some("310".to_string()),
                                 guid: self.id.clone(),
                             };

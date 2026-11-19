@@ -325,8 +325,10 @@ struct RawSmsIncomingMessage {
     format: String,
     #[serde(rename = "b")]
     mime_type: Option<String>,
+    // Optional: some iPhones omit `cs` on forwarded SMS (and RCS omits `ic`). Requiring
+    // them made the whole payload fail to deserialize, so the message was dropped.
     #[serde(rename = "cs")]
-    constant_uuid: String, // some uuid
+    constant_uuid: Option<String>, // some uuid
     r: bool, // always true
     #[serde(rename = "k")]
     content: Vec<RawSmsIncomingMessageData>,
@@ -339,7 +341,7 @@ struct RawSmsIncomingMessage {
     sc: Option<u32>, // always 0
     #[serde(rename = "m")]
     mode: String, // sms or mms
-    ic: u32, // always 1
+    ic: Option<u32>, // always 1 (missing on some iPhones / RCS)
     n: Option<String>, // always 310 (missing)
     #[serde(rename = "g")]
     guid: String
